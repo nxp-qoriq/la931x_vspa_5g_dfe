@@ -1,0 +1,155 @@
+/*
+* Copyright 2022-2024 NXP
+*
+*/
+
+//************************************************************************
+//*
+//* VCPU PRAM size: 0x08000 //  32KB = 4Kx64(64)bit
+//* VCPU DRAM size: 0x04000 //  16KB = 1024 x 128b - 16bit writes
+//* IPPU PRAM size: 0x00800 //   2KB = 0.5Kx32bit
+//* IPPU DRAM size: 0x04000 //  16KB = 1024 x 128b - 16bit writes
+//* TCM       size: 0x10000 //  64KB
+
+//*
+//************************************************************************
+
+// Define configuration specific values
+//
+arch(vspa2);
+number_of_cores(1);
+
+entry("_start");
+// DMEM_Line_Size is expressed in bytes and is dependent of AU number
+// The formula is 2 * number_of_AU * 4 bytes
+DMEM_Line_Size        = 4 * 2 * n_au();
+VCPU_DataReserveSize  = 2*DMEM_Line_Size;
+
+VCPU_AS_IPPU_size = 0;  //32768 //-0x20000
+VCPU_DRAMSize_total = 0x4000 - VCPU_AS_IPPU_size;
+IPPU_DRAMSize_total = 0x4000 + VCPU_AS_IPPU_size;
+
+DATA_TopMemAddress    = VCPU_DRAMSize_total + IPPU_DRAMSize_total;  // last address of VCPU data space
+VCPU_CODE_TopMemAddress    = 0x8000;  //0x8000
+VCPU_TopMemAddress    = DATA_TopMemAddress - IPPU_DRAMSize;
+
+HeapSize   = 0x00000;
+StackSize  = 0x00400;   //must be at least 0x400
+IPPU_DRAM_start = ((VCPU_TopMemAddress + IPPU_DRAMSize) > DATA_TopMemAddress)
+	? (DATA_TopMemAddress - IPPU_DRAMSize)
+	: VCPU_TopMemAddress;
+StackStart = IPPU_DRAM_start - align((StackSize + HeapSize), DMEM_Line_Size);
+
+VCPU_PRAMSize = VCPU_CODE_TopMemAddress;
+VCPU_DRAMSize = StackStart - VCPU_DataReserveSize;
+IPPU_PRAMSize = 0x00800; //0x00800;
+IPPU_DRAMSize = IPPU_DRAMSize_total;
+memory_space (*)
+{
+	0("rx"): vcpu_pram, org = 0x0, len = VCPU_CODE_TopMemAddress ;
+	1("rw"): dram, org = 0x0, len = DATA_TopMemAddress; // contains both VCPU DRAM and IPPU DRAM
+	2("rx"): ippu_pram, org = 0x0, len = IPPU_PRAMSize;
+}
+
+unit private (*){
+	MEMORY {
+		.vpram ("rx") 0 : org = 0x0, len = VCPU_PRAMSize;
+//        .l1c_ringbuf ("rw")  1: org = 0;
+//		vcpu_dram_r RESERVE   ("rw") 1 : org = 0x0, len = VCPU_DataReserveSize; //reserve at address 0 one DMEM line
+		.vdram ("rw") 1 : org = 0; //AFTER(.l1c_ringbuf); //org = VCPU_DataReserveSize, len = VCPU_DRAMSize;
+		.ipram ("rx") 2 : org = 0x0, len = IPPU_PRAMSize;
+		.idram ("rw") 1 : org = IPPU_DRAM_start, len = IPPU_DRAMSize;
+		
+		memory_stack_and_heap ("rw") 1 : org = StackStart , len = StackSize + HeapSize;
+	}
+	
+	SECTIONS {
+		vcpu_pram{
+		    .init
+			"*startup*.eln"(".text");
+			.text
+			.default
+			.unlikely
+			unmatch_pgm("*");
+		} > .vpram;
+		
+//        l1c_ringbuf {
+//            . = align(SIZE_VSPA_AXI);
+//            ___l1c_ringbuf_start = .;
+//            ".a2v_ringbuf";
+//            ".a2v_ringbuf1";
+//            ".a2v_ringbuf2";
+//            ___l1c_ringbuf_limit = .;
+//        } > .l1c_ringbuf;
+
+		vdram {
+			.bsstab
+			__bss_start = .;
+			//. = 0x100;
+			.vbss0
+			.bss_line_aligned
+			.vbss1
+			.vbss2
+			.vbss3
+			.vbss4
+			.vbss5
+			.vbss6
+			.vbss7
+			.vbss
+			".bss"
+			unmatch_bss("*");
+			__bss_end = .;
+			.vcpu_base
+		    __data_start = .;
+			.rom
+			.rodata
+			.data_aligned
+			unmatch_rom("*");
+			".data"
+			unmatch_data("*");
+			__data_end = .;
+			"*startup*.eln"(".data");
+			_cpp_staticinit_start_sect
+			_cpp_staticinit_control_pattern_sect
+			.staticinit
+			_cpp_staticinit_end_sect
+			__end = .;
+		} >.vdram;
+		
+		idram
+		{
+			//. = 0x4400;
+			__ibss_start = .;
+			.ibss
+			.ibss0
+			.ibss1
+			__ibss_end = .;
+			//. = (DATA_TopMemAddress-5120); //align(0x20000);
+			.idata
+		} > .idram
+		
+		ippu_pram
+		{
+			.itext
+		} > .ipram
+		
+		.stack {
+			LNK_SECTION(stack, "rw", StackSize + HeapSize, DMEM_Line_Size, "stack_and_heap");
+		}> memory_stack_and_heap;
+
+//        stack {
+//            . = align(8*n_au());
+//            ___ovly_data_limit = .;
+//            ___stack_start = .;
+//            __stack = .;
+//            ___stack_limit = vmorg(.vdram) + SIZE_VSPA_DRAM - sizeof(.l1c_ringbuf);
+//        } > .stack;
+		
+	}
+}
+
+_end = __end;
+__heap = endof("stack_and_heap") & 0xFFFFFF;
+_heap = __heap;
+__stack = originof("stack_and_heap") & 0xFFFFFF;
+_stack = originof("stack_and_heap") & 0xFFFFFF;
